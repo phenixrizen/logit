@@ -1,7 +1,6 @@
 package logit
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"regexp"
@@ -10,15 +9,13 @@ import (
 
 	"github.com/intwinelabs/logger"
 	"github.com/streadway/amqp"
-	"gocloud.dev/pubsub"
-	"gocloud.dev/pubsub/rabbitpubsub"
 )
 
 type LogitClient struct {
 	log           *logger.Logger
 	ampqConn      *amqp.Connection
-	subscriptions []*pubsub.Subscription
-	control       *pubsub.Topic
+	subscriptions []<-chan amqp.Delivery
+	control       *amqp.Channel
 	errChan       chan error
 	stop          chan bool
 	startTime     time.Time
@@ -33,12 +30,12 @@ func NewClient(expr string, topics []string, log *logger.Logger) (*LogitClient, 
 	}
 
 	// connect to the control topic
-	control := rabbitpubsub.OpenTopic(rabbitConn, ControlTopic, nil)
-	if control == nil {
-		return nil, nil, fmt.Errorf("Error creating topic")
+	control, err := publishTopic(ControlTopic, rabbitConn)
+	if err != nil {
+		return nil, nil, fmt.Errorf("Error opening publishing topic: %s")
 	}
 
-	var subscriptions []*pubsub.Subscription
+	var subscriptions []<-chan amqp.Delivery
 
 	// create a regexp subscription
 	if expr != "" {
@@ -58,17 +55,18 @@ func NewClient(expr string, topics []string, log *logger.Logger) (*LogitClient, 
 		if err != nil {
 			return nil, nil, err
 		}
-		msg := &pubsub.Message{
-			Body: mBody,
+		msg := amqp.Publishing{
+			ContentType: "application/json",
+			Body:        []byte(mBody),
 		}
-		err = control.Send(context.Background(), msg)
+		err = control.Publish(ControlTopic, "", false, false, msg)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, fmt.Errorf("error sending control message: %s", mBody)
 		}
 
 		// create the subscription for regexp log messages
-		regExpSub := rabbitpubsub.OpenSubscription(rabbitConn, fmt.Sprintf("__TOPIC__%s", cMsg.Topic), nil)
-		if regExpSub == nil {
+		regExpSub, err := consumeTopic(fmt.Sprintf("__TOPIC__%s", cMsg.Topic), rabbitConn)
+		if err != nil {
 			return nil, nil, fmt.Errorf("Error creating subscription")
 		}
 		subscriptions = append(subscriptions, regExpSub)
@@ -90,17 +88,18 @@ func NewClient(expr string, topics []string, log *logger.Logger) (*LogitClient, 
 		if err != nil {
 			return nil, nil, err
 		}
-		msg := &pubsub.Message{
-			Body: mBody,
+		msg := amqp.Publishing{
+			ContentType: "application/json",
+			Body:        []byte(mBody),
 		}
-		err = control.Send(context.Background(), msg)
+		err = control.Publish(ControlTopic, "", false, false, msg)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, fmt.Errorf("error sending control message: %s", mBody)
 		}
 
 		// create the subscription for regexp log messages
-		sub := rabbitpubsub.OpenSubscription(rabbitConn, fmt.Sprintf("__TOPIC__%s", topic), nil)
-		if sub == nil {
+		sub, err := consumeTopic(fmt.Sprintf("__TOPIC__%s", cMsg.Topic), rabbitConn)
+		if err != nil {
 			return nil, nil, fmt.Errorf("Error creating subscription")
 		}
 		subscriptions = append(subscriptions, sub)
@@ -123,13 +122,9 @@ func (lc *LogitClient) Run() {
 	// for each subscrition we launch a go routine to handle the msgs
 	lc.log.Info("Waiting for log messages...")
 	for _, sub := range lc.subscriptions {
-		go func(sub *pubsub.Subscription) {
-			for {
-				msg, err := sub.Receive(context.Background())
-				if err != nil {
-					lc.handleError(err)
-					break
-				}
+		go func(sub <-chan amqp.Delivery) {
+			for msg := range sub {
+				lc.log.Info(msg.Body)
 				go lc.handleMsg(msg)
 				if lc.startTime.IsZero() {
 					lc.startTime = time.Now()
@@ -145,20 +140,12 @@ func (lc *LogitClient) Run() {
 	}
 }
 
-func (lc *LogitClient) handleMsg(msg *pubsub.Message) {
-	/*if lc.startTime.Add(5*time.Second).Unix() > time.Now().Unix() || lc.logCnt > 99 {
-		lc.Stop()
-	} else {*/
+func (lc *LogitClient) handleMsg(msg amqp.Delivery) {
 	cnt := atomic.AddUint32(&lc.logCnt, 1)
 	lc.log.Infof("[%d] Log: %s\n", cnt, msg.Body)
-	msg.Ack()
-	//}
 }
 
 func (lc *LogitClient) Stop() {
-	for _, sub := range lc.subscriptions {
-		sub.Shutdown(context.Background())
-	}
 	lc.ampqConn.Close()
 	lc.stop <- true
 }

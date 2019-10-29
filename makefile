@@ -1,7 +1,6 @@
 PKG := "github.com/phenixrizen/logit"
 PKG_NAME := "logit"
-PKG_LIST := $(shell go list ${PKG}/... | grep -v /vendor/)
-GO_VENDOR := $(shell which govendor)
+PKG_LIST := $(shell go list ${PKG}/...)
 USER := $(shell whoami)
 IP := $(shell hostname -I | sed 's/ //')
 .PHONY: all 
@@ -10,6 +9,9 @@ all: deps build ## Make all
 
 deps : ## Go modules download
 	@go mod download
+
+install : ## Intall needed deb packages
+	@sudo apt install -y rabbitmq-server
 
 compiletest: ## Compiles test
 	@go test -v  ./... -run XXxxxXXXxxx  # ensures tests compile before running

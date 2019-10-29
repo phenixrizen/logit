@@ -2,7 +2,6 @@ package logit
 
 import (
 	"bufio"
-	"context"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -11,8 +10,6 @@ import (
 
 	"github.com/intwinelabs/logger"
 	"github.com/streadway/amqp"
-	"gocloud.dev/pubsub"
-	"gocloud.dev/pubsub/rabbitpubsub"
 )
 
 var ControlTopic = "__CONTROL__"
@@ -21,11 +18,10 @@ type LogitServer struct {
 	log        *logger.Logger
 	listener   *net.TCPListener
 	ampqConn   *amqp.Connection
-	ampqChan   *amqp.Channel
-	control    *pubsub.Topic
-	controlSub *pubsub.Subscription
-	topics     map[string]*pubsub.Topic
-	regexps    map[*regexp.Regexp]*pubsub.Topic
+	control    *amqp.Channel
+	controlSub <-chan amqp.Delivery
+	topics     map[string]*amqp.Channel
+	regexps    map[*regexp.Regexp]*amqp.Channel
 	errChan    chan error
 	timeout    int
 	stop       chan bool
@@ -55,22 +51,21 @@ func NewServer(listen string, timeout int, log *logger.Logger) (*LogitServer, ch
 	if err != nil {
 		return nil, nil, err
 	}
-	rabbitChan, err := rabbitConn.Channel()
+
+	// create a control topic
+	err = declareTopic(ControlTopic, rabbitConn)
 	if err != nil {
 		return nil, nil, err
 	}
-
-	// create a control topic
-	declareTopic(ControlTopic, rabbitChan)
-	control := rabbitpubsub.OpenTopic(rabbitConn, ControlTopic, nil)
-	if control == nil {
-		return nil, nil, fmt.Errorf("Error creating topic")
+	control, err := publishTopic(ControlTopic, rabbitConn)
+	if err != nil {
+		return nil, nil, fmt.Errorf("Error creating topic: %s", err)
 	}
 
 	// Create a subscription connected to the control topic
-	controlSub := rabbitpubsub.OpenSubscription(rabbitConn, ControlTopic, nil)
-	if controlSub == nil {
-		return nil, nil, fmt.Errorf("Error creating subscription")
+	controlSub, err := consumeTopic(ControlTopic, rabbitConn)
+	if err != nil {
+		return nil, nil, fmt.Errorf("Error creating subscription: %s", err)
 	}
 
 	errChan := make(chan error)
@@ -78,33 +73,14 @@ func NewServer(listen string, timeout int, log *logger.Logger) (*LogitServer, ch
 		log:        log,
 		listener:   listener,
 		ampqConn:   rabbitConn,
-		ampqChan:   rabbitChan,
 		control:    control,
 		controlSub: controlSub,
-		topics:     make(map[string]*pubsub.Topic),
-		regexps:    make(map[*regexp.Regexp]*pubsub.Topic),
+		topics:     make(map[string]*amqp.Channel),
+		regexps:    make(map[*regexp.Regexp]*amqp.Channel),
 		errChan:    errChan,
 	}
 
 	return ls, errChan, nil
-}
-
-func declareTopic(topic string, rabbitChan *amqp.Channel) error {
-	// create a rabbit exchange
-	err := rabbitChan.ExchangeDeclare(topic, "fanout", false, false, false, false, nil)
-	if err != nil {
-		return err
-	}
-	// create a rabbit queue
-	q, err := rabbitChan.QueueDeclare(topic, false, false, false, false, nil)
-	if err != nil {
-		return err
-	}
-	err = rabbitChan.QueueBind(q.Name, "", topic, false, nil)
-	if err != nil {
-		return err
-	}
-	return nil
 }
 
 func (ls *LogitServer) handleConnection(conn net.Conn) {
@@ -138,18 +114,25 @@ func (ls *LogitServer) handleLogLine(logLine string) {
 		top = logLine[idx+2:]
 		if len(log) > 0 && len(top) > 1 {
 			// create a msg
-			msg := &pubsub.Message{
-				Body: []byte(log),
+			msg := amqp.Publishing{
+				ContentType: "text/plain",
+				Body:        []byte(log),
 			}
 			// send the msg to the topic
 			if topic, ok := ls.topics[top]; ok {
-				topic.Send(context.Background(), msg)
+				err := topic.Publish(fmt.Sprintf("__TOPIC__%s", top), "", false, false, msg)
+				if err != nil {
+					ls.errChan <- fmt.Errorf("error sending log line on msg queue: %s", logLine)
+				}
 			} else {
 				// if we have regexp registered we check them
 				for regExp, regExpTopic := range ls.regexps {
 					// if we have a match we send the msg
 					if regExp.Match([]byte(log)) {
-						regExpTopic.Send(context.Background(), msg)
+						err := regExpTopic.Publish(fmt.Sprintf("__TOPIC__%s", regExp.String()), "", false, false, msg)
+						if err != nil {
+							ls.errChan <- fmt.Errorf("error sending log line on msg queue: %s", logLine)
+						}
 					}
 				}
 			}
@@ -193,14 +176,9 @@ func (ls *LogitServer) Run() {
 
 func (ls *LogitServer) handleControlMsgs() {
 	// we handle control msgs to create to topics
-	for {
-		msg, err := ls.controlSub.Receive(context.Background())
-		if err != nil {
-			ls.handleError(err)
-			continue
-		}
+	for msg := range ls.controlSub {
 		var cMsg controlMsg
-		err = json.Unmarshal(msg.Body, &cMsg)
+		err := json.Unmarshal(msg.Body, &cMsg)
 		if err != nil {
 			ls.errChan <- err
 			continue
@@ -214,25 +192,25 @@ func (ls *LogitServer) handleControlMsgs() {
 					ls.errChan <- err
 					continue
 				}
-				err = declareTopic(fmt.Sprintf("__TOPIC__%s", cMsg.Topic), ls.ampqChan)
+				err = declareTopic(fmt.Sprintf("__TOPIC__%s", cMsg.Topic), ls.ampqConn)
 				if err != nil {
-					ls.errChan <- err
+					ls.errChan <- fmt.Errorf("Error createing topic: %s", cMsg.Topic)
 					continue
 				}
-				topic := rabbitpubsub.OpenTopic(ls.ampqConn, fmt.Sprintf("__TOPIC__%s", cMsg.Topic), nil)
-				if topic == nil {
+				topic, err := publishTopic(cMsg.Topic, ls.ampqConn)
+				if err != nil {
 					ls.errChan <- fmt.Errorf("Error createing topic: %s", cMsg.Topic)
 					continue
 				}
 				ls.regexps[regExp] = topic
 			} else {
 				// create a named topic
-				err := declareTopic(fmt.Sprintf("__TOPIC__%s", cMsg.Topic), ls.ampqChan)
+				err := declareTopic(fmt.Sprintf("__TOPIC__%s", cMsg.Topic), ls.ampqConn)
 				if err != nil {
 					ls.errChan <- err
 					continue
 				}
-				topic := rabbitpubsub.OpenTopic(ls.ampqConn, fmt.Sprintf("__TOPIC__%s", cMsg.Topic), nil)
+				topic, err := publishTopic(cMsg.Topic, ls.ampqConn)
 				if topic == nil {
 					ls.errChan <- fmt.Errorf("Error createing topic: %s", cMsg.Topic)
 					continue
@@ -240,17 +218,16 @@ func (ls *LogitServer) handleControlMsgs() {
 				ls.topics[cMsg.Topic] = topic
 			}
 		}
-		msg.Ack()
 	}
 }
 
 func (ls *LogitServer) Stop() {
 	ls.listener.Close()
 	for _, topic := range ls.topics {
-		topic.Shutdown(context.Background())
+		topic.Close()
 	}
 	for _, topic := range ls.regexps {
-		topic.Shutdown(context.Background())
+		topic.Close()
 	}
 	ls.ampqConn.Close()
 	ls.stop <- true

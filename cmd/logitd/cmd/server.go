@@ -1,6 +1,10 @@
 package cmd
 
 import (
+	"os"
+	"os/signal"
+	"syscall"
+
 	"github.com/intwinelabs/logger"
 	"github.com/spf13/cobra"
 
@@ -42,6 +46,14 @@ func runServer() {
 		}
 	}(log)
 
-	// run the server
+	// listen for ctrl-c to cleanup
+	c := make(chan os.Signal)
+	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
+	go func(server *logit.LogitServer) {
+		<-c
+		server.Stop()
+		os.Exit(1)
+	}(server)
+
 	server.Run()
 }
