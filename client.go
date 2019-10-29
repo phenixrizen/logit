@@ -32,7 +32,7 @@ func NewClient(expr string, topics []string, log *logger.Logger) (*LogitClient, 
 	// connect to the control topic
 	control, err := publishTopic(ControlTopic, rabbitConn)
 	if err != nil {
-		return nil, nil, fmt.Errorf("Error opening publishing topic: %s")
+		return nil, nil, fmt.Errorf("Error opening publishing topic: %s", err)
 	}
 
 	var subscriptions []<-chan amqp.Delivery
