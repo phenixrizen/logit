@@ -10,8 +10,11 @@ all: deps build ## Make all
 deps : ## Go modules download
 	@go mod download
 
-install : ## Intall needed deb packages
+install: ## Intall needed deb packages
 	@sudo apt install -y rabbitmq-server
+
+plug: ## Enable the RabbitMQ Managment Plugin
+	@rabbitmq-plugins enable rabbitmq_management
 
 compiletest: ## Compiles test
 	@go test -v  ./... -run XXxxxXXXxxx  # ensures tests compile before running
