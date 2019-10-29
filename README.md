@@ -29,8 +29,17 @@ $ make
 
 ```shell
 $ ./logitd server
+```
+
+```shell
 $ ./logitd client --expr "^Hello.*" --topics queries,purges
+```
+
+```shell
 $ ./logitd client --topics queries
+```
+
+```shell
 $ netcat localhost 42280 < logs
 ```
 
