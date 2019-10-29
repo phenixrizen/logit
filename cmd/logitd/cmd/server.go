@@ -49,11 +49,12 @@ func runServer() {
 	// listen for ctrl-c to cleanup
 	c := make(chan os.Signal)
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
-	go func(server *logit.LogitServer) {
+	go func(server *logit.LogitServer, log *logger.Logger) {
 		<-c
+		log.Info("Recieved interrupt shutting down....")
 		server.Stop()
 		os.Exit(1)
-	}(server)
+	}(server, log)
 
 	server.Run()
 }

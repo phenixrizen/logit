@@ -78,6 +78,7 @@ func NewServer(listen string, timeout int, log *logger.Logger) (*LogitServer, ch
 		topics:     make(map[string]*amqp.Channel),
 		regexps:    make(map[*regexp.Regexp]*amqp.Channel),
 		errChan:    errChan,
+		stop:       make(chan bool),
 	}
 
 	return ls, errChan, nil
@@ -85,10 +86,6 @@ func NewServer(listen string, timeout int, log *logger.Logger) (*LogitServer, ch
 
 func (ls *LogitServer) handleConnection(conn net.Conn) {
 	ls.log.Infof("Handling connection: %s", conn.RemoteAddr().String())
-	// set a read deadline
-	//deadline := time.Now().Add(time.Duration(ls.timeout) * time.Minute)
-	//err := conn.SetReadDeadline(deadline)
-	//ls.handleError(err)
 
 	// create a scanner to handle incoming log lines on the tcp conn
 	scanner := bufio.NewScanner(conn)
@@ -157,6 +154,7 @@ func (ls *LogitServer) Run() {
 			conn, err := ls.listener.Accept()
 			if err != nil {
 				ls.errChan <- err
+				continue
 			}
 			go ls.handleConnection(conn)
 		}
@@ -222,13 +220,13 @@ func (ls *LogitServer) handleControlMsgs() {
 }
 
 func (ls *LogitServer) Stop() {
-	ls.listener.Close()
 	for _, topic := range ls.topics {
 		topic.Close()
 	}
 	for _, topic := range ls.regexps {
 		topic.Close()
 	}
+	ls.listener.Close()
 	ls.ampqConn.Close()
 	ls.stop <- true
 }

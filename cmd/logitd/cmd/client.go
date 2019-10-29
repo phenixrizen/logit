@@ -50,11 +50,12 @@ func runClient() {
 	// listen for ctrl-c to cleanup
 	c := make(chan os.Signal)
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
-	go func(clinet *logit.LogitClient) {
+	go func(clinet *logit.LogitClient, log *logger.Logger) {
 		<-c
+		log.Info("Recieved interrupt shutting down....")
 		client.Stop()
 		os.Exit(1)
-	}(client)
+	}(client, log)
 
 	client.Run()
 }

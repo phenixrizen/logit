@@ -124,7 +124,6 @@ func (lc *LogitClient) Run() {
 	for _, sub := range lc.subscriptions {
 		go func(sub <-chan amqp.Delivery) {
 			for msg := range sub {
-				lc.log.Info(msg.Body)
 				go lc.handleMsg(msg)
 				if lc.startTime.IsZero() {
 					lc.startTime = time.Now()
