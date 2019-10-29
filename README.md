@@ -42,6 +42,7 @@ $ ./logitd client --topics queries
 ```shell
 $ netcat localhost 42280 < logs
 ```
+- Cat the logs file for the format I'm expecting
 
 ## Monitor Performane
 
